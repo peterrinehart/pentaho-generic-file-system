@@ -58,25 +58,32 @@ public abstract class BaseGenericFileProvider<T extends IGenericFile> implements
   // endregion
 
   @Override
-  public boolean createFile( @NonNull GenericFilePath path,
-                             @NonNull InputStream content,
-                             @NonNull CreateFileOptions createFileOptions )
+  public void createFile( @NonNull GenericFilePath path,
+                          @NonNull InputStream content,
+                          @NonNull CreateFileOptions createFileOptions )
     throws OperationFailedException {
     Objects.requireNonNull( path );
     Objects.requireNonNull( content );
 
-    boolean fileCreated = createFileCore( path, content, createFileOptions );
-
-    if ( fileCreated ) {
-      clearTreeCache();
-    }
-
-    return fileCreated;
+    createFileCore( path, content, createFileOptions );
+    clearTreeCache();
   }
 
-  protected abstract boolean createFileCore( @NonNull GenericFilePath path,
-                                             @NonNull InputStream content,
-                                             @NonNull CreateFileOptions createFileOptions )
+  protected abstract void createFileCore( @NonNull GenericFilePath path,
+                                          @NonNull InputStream content,
+                                          @NonNull CreateFileOptions createFileOptions )
+    throws OperationFailedException;
+
+  @Override
+  public void setFileContent( @NonNull GenericFilePath path, @NonNull InputStream content )
+    throws OperationFailedException {
+    Objects.requireNonNull( path );
+    Objects.requireNonNull( content );
+
+    setFileContentCore( path, content );
+  }
+
+  protected abstract void setFileContentCore( @NonNull GenericFilePath path, @NonNull InputStream content )
     throws OperationFailedException;
 
   // region Get Root Trees

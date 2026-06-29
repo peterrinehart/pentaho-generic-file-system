@@ -40,9 +40,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -53,6 +56,7 @@ import static org.pentaho.platform.api.genericfile.model.IGenericFile.TYPE_FOLDE
 /**
  * Tests for the {@link BaseGenericFileProvider} class.
  */
+@SuppressWarnings( { "DataFlowIssue", "RedundantThrows" } )
 class BaseGenericFileProviderTest {
   static class GenericFileProviderForTesting<T extends IGenericFile> extends BaseGenericFileProvider<T> {
     @Override
@@ -61,10 +65,16 @@ class BaseGenericFileProviderTest {
     }
 
     @Override
-    protected boolean createFileCore( @NonNull GenericFilePath path,
-                                      @NonNull InputStream content,
-                                      @NonNull CreateFileOptions createFileOptions ) {
-      return false;
+    protected void createFileCore( @NonNull GenericFilePath path,
+                                   @NonNull InputStream content,
+                                   @NonNull CreateFileOptions createFileOptions ) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    protected void setFileContentCore( @NonNull GenericFilePath path, @NonNull InputStream content )
+      throws OperationFailedException {
+      throw new UnsupportedOperationException();
     }
 
     @NonNull
@@ -1692,6 +1702,70 @@ class BaseGenericFileProviderTest {
     List<IGenericFileTree> children = result.getChildren();
     assertNotNull( children );
     assertEquals( 2, children.size() );
+  }
+  // endregion
+
+  // region setFileContent
+  @Test
+  void testSetFileContentCallsSetFileContentCore() throws OperationFailedException {
+    GenericFileProviderForTesting<IGenericFile> provider = spy( new GenericFileProviderForTesting<>() );
+
+    GenericFilePath path = GenericFilePath.parseRequired( "/home/admin/file.txt" );
+    InputStream content = mock( InputStream.class );
+
+    doReturn( true ).when( provider ).owns( any( GenericFilePath.class ) );
+    // Override to do nothing (success)
+    doNothing().when( provider ).setFileContentCore( path, content );
+
+    provider.setFileContent( path, content );
+
+    verify( provider ).setFileContentCore( path, content );
+  }
+
+  @Test
+  void testSetFileContentDoesNotClearTreeCache() throws OperationFailedException {
+    GenericFileProviderForTesting<IGenericFile> provider = spy( new GenericFileProviderForTesting<>() );
+
+    GenericFilePath path = GenericFilePath.parseRequired( "/home/admin/file.txt" );
+    InputStream content = mock( InputStream.class );
+
+    doNothing().when( provider ).setFileContentCore( path, content );
+
+    provider.setFileContent( path, content );
+
+    verify( provider, never() ).clearTreeCache();
+  }
+
+  @Test
+  void testSetFileContentThrowsNullPointerExceptionWhenPathIsNull() {
+    GenericFileProviderForTesting<IGenericFile> provider = new GenericFileProviderForTesting<>();
+    InputStream content = mock( InputStream.class );
+
+    assertThrows( NullPointerException.class, () -> provider.setFileContent( null, content ) );
+  }
+
+  @Test
+  void testSetFileContentThrowsNullPointerExceptionWhenContentIsNull() throws Exception {
+    GenericFileProviderForTesting<IGenericFile> provider = new GenericFileProviderForTesting<>();
+    GenericFilePath path = GenericFilePath.parseRequired( "/home/admin/file.txt" );
+
+    assertThrows( NullPointerException.class, () -> provider.setFileContent( path, null ) );
+  }
+
+  @Test
+  void testSetFileContentPropagatesOperationFailedException() throws OperationFailedException {
+    GenericFileProviderForTesting<IGenericFile> provider = spy( new GenericFileProviderForTesting<>() );
+
+    GenericFilePath path = GenericFilePath.parseRequired( "/home/admin/file.txt" );
+    InputStream content = mock( InputStream.class );
+
+    doThrow( new OperationFailedException( "Set file content failed." ) ).when( provider )
+      .setFileContentCore( path, content );
+
+    OperationFailedException exception =
+      assertThrows( OperationFailedException.class, () -> provider.setFileContent( path, content ) );
+
+    assertEquals( "Set file content failed.", exception.getMessage() );
   }
   // endregion
 }

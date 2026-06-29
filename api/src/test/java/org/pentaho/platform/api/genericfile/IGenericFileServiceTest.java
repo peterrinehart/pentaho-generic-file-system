@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -78,9 +79,15 @@ class IGenericFileServiceTest {
     }
 
     @Override
-    public boolean createFile( @NonNull GenericFilePath path,
-                               @NonNull InputStream content,
-                               @NonNull CreateFileOptions createFileOptions )
+    public void createFile( @NonNull GenericFilePath path,
+                            @NonNull InputStream content,
+                            @NonNull CreateFileOptions createFileOptions )
+      throws OperationFailedException {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setFileContent( @NonNull GenericFilePath path, @NonNull InputStream content )
       throws OperationFailedException {
       throw new UnsupportedOperationException();
     }
@@ -291,10 +298,10 @@ class IGenericFileServiceTest {
       CreateFileOptions options = new CreateFileOptions();
       options.setOverwrite( true );
 
-      doReturn( true ).when( service )
+      doNothing().when( service )
         .createFile( any( GenericFilePath.class ), any( InputStream.class ), any( CreateFileOptions.class ) );
 
-      assertTrue( service.createFile( "/foo/test.txt", mockContent, options ) );
+      service.createFile( "/foo/test.txt", mockContent, options );
 
       verify( service, times( 1 ) ).createFile( pathCaptor.capture(), contentCaptor.capture(),
         createFileOptionsArgumentCaptor.capture() );
