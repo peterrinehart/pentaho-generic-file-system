@@ -2,13 +2,14 @@
  *
  * Pentaho
  *
- * Copyright (C) 2024 by Hitachi Vantara, LLC : http://www.pentaho.com
+ * Copyright (C) 2024 - 2026 by Pentaho Canada Inc. : http://www.pentaho.com
  *
  * Use of this software is governed by the Business Source License included
  * in the LICENSE.TXT file.
  *
- * Change Date: 2029-07-20
+ * Change Date: 2030-06-15
  ******************************************************************************/
+
 
 
 package org.pentaho.platform.genericfile.providers.repository;
@@ -666,6 +667,30 @@ class RepositoryFileProviderTest {
   }
 
   @Test
+  void testGetTreeNullMaxDepthPassedThroughToFileService() throws OperationFailedException {
+    NativeDtoRepositoryScenario scenario = new NativeDtoRepositoryScenario();
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( scenario.rootTree )
+      .when( fileServiceMock )
+      .doGetTree( any(), any(), any(), anyBoolean(), anyBoolean(), anyBoolean() );
+
+    RepositoryFileProvider repositoryProvider =
+      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock );
+
+    GetTreeOptions options = new GetTreeOptions();
+    options.setBasePath( ROOT_PATH );
+    // Intentionally leave maxDepth unset (null) to exercise the null branch.
+
+    IGenericFileTree tree = repositoryProvider.getTree( options );
+
+    assertRepositoryTree( tree );
+
+    // Null max depth is passed through unchanged to the backend (not treated as zero depth).
+    verify( fileServiceMock, times( 1 ) ).doGetTree( ENCODED_ROOT_PATH, null, ALL_FILTER, false, false, false );
+  }
+
+  @Test
   void testGetTreeThrowsNotFoundWhenDoGetTreeReturnsNull() throws InvalidPathException {
     FileService fileServiceMock = mock( FileService.class );
     doReturn( null )
@@ -680,6 +705,48 @@ class RepositoryFileProviderTest {
     options.setMaxDepth( 1 );
 
     assertThrows( NotFoundException.class, () -> repositoryProvider.getTree( options ) );
+  }
+
+  @Test
+  void testGetTreeThrowsAccessControlWhenDoGetTreeNullAndReadDenied() throws InvalidPathException {
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( null )
+      .when( fileServiceMock )
+      .doGetTree( any(), any(), any(), anyBoolean(), anyBoolean(), anyBoolean() );
+
+    // The follow-up existence check itself hits the ABS-level repository.read denial.
+    doThrow( UnifiedRepositoryAccessDeniedException.class ).when( fileServiceMock ).doesExist( ENCODED_ROOT_PATH );
+
+    RepositoryFileProvider repositoryProvider =
+      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock );
+
+    GetTreeOptions options = new GetTreeOptions();
+    options.setBasePath( ROOT_PATH );
+    options.setMaxDepth( 1 );
+
+    assertThrows( AccessControlException.class, () -> repositoryProvider.getTree( options ) );
+  }
+
+  @Test
+  void testGetTreeThrowsOperationFailedWhenDoGetTreeNullButFoundAndReadable() throws InvalidPathException {
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( null )
+      .when( fileServiceMock )
+      .doGetTree( any(), any(), any(), anyBoolean(), anyBoolean(), anyBoolean() );
+
+    // Base path is found and readable now: the null was not a not-found/no-read condition.
+    doReturn( true ).when( fileServiceMock ).doesExist( ENCODED_ROOT_PATH );
+
+    RepositoryFileProvider repositoryProvider =
+      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock );
+
+    GetTreeOptions options = new GetTreeOptions();
+    options.setBasePath( ROOT_PATH );
+    options.setMaxDepth( 1 );
+
+    OperationFailedException ex =
+      assertThrows( OperationFailedException.class, () -> repositoryProvider.getTree( options ) );
+    assertEquals( OperationFailedException.class, ex.getClass() );
   }
 
   @Test
@@ -1028,16 +1095,71 @@ class RepositoryFileProviderTest {
   void testDeleteFilePermanentlyOperationFailed() throws Exception {
     GenericFilePath path =
       GenericFilePath.parse( "/home/admin/.trash/pho:8b69da2b-2a10-4a82-89bc-a376e52d5482" + "/PAZReport.xanalyzer" );
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
 
     FileService fileServiceMock = mock( FileService.class );
     doNothing().when( fileServiceMock ).doDeleteFilesPermanent( any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    RepositoryFile nativeFile = createNativeFile( fileId, path, false );
+    doReturn( nativeFile ).when( repositoryMock ).getFileById( fileId );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
     doThrow( new OperationFailedException() ).when( fileServiceMock ).doDeleteFilesPermanent( any() );
 
     assertThrows( OperationFailedException.class, () -> repositoryProvider.deleteFilePermanently( path ) );
     verify( fileServiceMock ).doDeleteFilesPermanent( repositoryProvider.getTrashFileId( path ) );
+  }
+
+  @Test
+  void testDeleteFilePermanentlyAccessControlException() throws Exception {
+    GenericFilePath path =
+      GenericFilePath.parse( "/home/admin/.trash/pho:8b69da2b-2a10-4a82-89bc-a376e52d5482" + "/PAZReport.xanalyzer" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( new UnifiedRepositoryAccessDeniedException() ).when( fileServiceMock ).doDeleteFilesPermanent( any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    assertThrows( AccessControlException.class, () -> repositoryProvider.deleteFilePermanently( path ) );
+    verify( repositoryMock, never() ).getFileById( anyString() );
+  }
+
+  @Test
+  void testDeleteFilePermanentlyNotFoundAfterBackendFailure() throws Exception {
+    GenericFilePath path =
+      GenericFilePath.parse( "/home/admin/.trash/pho:8b69da2b-2a10-4a82-89bc-a376e52d5482" + "/PAZReport.xanalyzer" );
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( new RuntimeException( "delete failed" ) ).when( fileServiceMock ).doDeleteFilesPermanent( any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( null ).when( repositoryMock ).getFileById( fileId );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    NotFoundException ex =
+      assertThrows( NotFoundException.class, () -> repositoryProvider.deleteFilePermanently( path ) );
+
+    assertEquals( String.format( "Path not found '%s'.", fileId ), ex.getMessage() );
+    verify( repositoryMock, never() ).hasAccess( anyString(), any() );
+  }
+
+  @Test
+  void testDeleteFilePermanentlyResourceAccessDeniedException() throws Exception {
+    GenericFilePath path =
+      GenericFilePath.parse( "/home/admin/.trash/pho:8b69da2b-2a10-4a82-89bc-a376e52d5482" + "/PAZReport.xanalyzer" );
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( new RuntimeException( "delete failed" ) ).when( fileServiceMock ).doDeleteFilesPermanent( any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    RepositoryFile nativeFile = createNativeFile( fileId, path, false );
+    doReturn( nativeFile ).when( repositoryMock ).getFileById( fileId );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.deleteFilePermanently( path ) );
+    verify( repositoryMock ).getFileById( fileId );
   }
 
   @Test
@@ -1225,6 +1347,72 @@ class RepositoryFileProviderTest {
 
   @ParameterizedTest
   @ValueSource( booleans = { true, false } )
+  void testDeleteFileResourceAccessDenied( boolean permanent ) throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+
+    FileService fileServiceMock = mock( FileService.class );
+
+    if ( permanent ) {
+      doThrow( UnifiedRepositoryException.class ).when( fileServiceMock ).doDeleteFilesPermanent( any() );
+    } else {
+      doThrow( UnifiedRepositoryException.class ).when( fileServiceMock ).doDeleteFiles( any() );
+    }
+
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    RepositoryFile nativeFile = createNativeFile( fileId, path, false );
+    doReturn( nativeFile ).when( repositoryMock ).getFile( any() );
+    doReturn( nativeFile ).when( repositoryMock ).getFileById( fileId );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.deleteFile( path, permanent ) );
+
+    if ( permanent ) {
+      verify( fileServiceMock, never() ).doDeleteFiles( anyString() );
+      verify( fileServiceMock ).doDeleteFilesPermanent( fileId );
+    } else {
+      verify( fileServiceMock ).doDeleteFiles( fileId );
+      verify( fileServiceMock, never() ).doDeleteFilesPermanent( anyString() );
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource( booleans = { true, false } )
+  void testDeleteFileFallsBackToOperationFailed( boolean permanent ) throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+
+    FileService fileServiceMock = mock( FileService.class );
+
+    if ( permanent ) {
+      doThrow( UnifiedRepositoryException.class ).when( fileServiceMock ).doDeleteFilesPermanent( any() );
+    } else {
+      doThrow( UnifiedRepositoryException.class ).when( fileServiceMock ).doDeleteFiles( any() );
+    }
+
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    RepositoryFile nativeFile = createNativeFile( fileId, path, false );
+    doReturn( nativeFile ).when( repositoryMock ).getFile( any() );
+    doReturn( nativeFile ).when( repositoryMock ).getFileById( fileId );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    OperationFailedException ex =
+      assertThrows( OperationFailedException.class, () -> repositoryProvider.deleteFile( path, permanent ) );
+    assertEquals( OperationFailedException.class, ex.getClass() );
+
+    if ( permanent ) {
+      verify( fileServiceMock, never() ).doDeleteFiles( anyString() );
+      verify( fileServiceMock ).doDeleteFilesPermanent( fileId );
+    } else {
+      verify( fileServiceMock ).doDeleteFiles( fileId );
+      verify( fileServiceMock, never() ).doDeleteFilesPermanent( anyString() );
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource( booleans = { true, false } )
   void testDeleteFileOperationFailedException( boolean permanent ) throws Exception {
     String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
     GenericFilePath path = GenericFilePath.parse( "/home/admin/exception-file.xanalyzer" );
@@ -1287,19 +1475,60 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testRestoreFileUnifiedRepositoryAccessDeniedException() throws Exception {
+  void testRestoreFileAccessControlException() throws Exception {
+    GenericFilePath path =
+      GenericFilePath.parse( "/home/admin/.trash/pho:8b69da2b-2a10-4a82-89bc-a376e52d5482" + "/PAZReport.xanalyzer" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    String fileId = repositoryProvider.getTrashFileId( path );
+    RepositoryFile nativeFile = createNativeFile( fileId, path, false );
+    doThrow( new UnifiedRepositoryAccessDeniedException() ).when( fileServiceMock ).doRestoreFiles( any() );
+    doReturn( nativeFile ).when( repositoryMock ).getFileById( fileId );
+    // Deleted item is found but the caller lacks WRITE access on the restore target.
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+
+    assertThrows( AccessControlException.class, () -> repositoryProvider.restoreFile( path ) );
+    verify( fileServiceMock ).doRestoreFiles( fileId );
+  }
+
+  @Test
+  void testRestoreFileUnifiedRepositoryNotFoundException() throws Exception {
     GenericFilePath path =
       GenericFilePath.parse( "/home/admin/.trash/pho:8b69da2b-2a10-4a82-89bc-a376e52d5482" + "/PAZReport.xanalyzer" );
 
     FileService fileServiceMock = mock( FileService.class );
     doNothing().when( fileServiceMock ).doRestoreFiles( any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( null ).when( repositoryMock ).getFileById( any() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
-    doThrow( new UnifiedRepositoryAccessDeniedException() ).when( fileServiceMock ).doRestoreFiles( any() );
+    doThrow( new InternalError() ).when( fileServiceMock ).doRestoreFiles( any() );
 
-    assertThrows( AccessControlException.class, () -> repositoryProvider.restoreFile( path ) );
+    assertThrows( NotFoundException.class, () -> repositoryProvider.restoreFile( path ) );
     verify( fileServiceMock ).doRestoreFiles( repositoryProvider.getTrashFileId( path ) );
+  }
+
+  @Test
+  void testRestoreFileResourceAccessDenied() throws Exception {
+    GenericFilePath path =
+      GenericFilePath.parse( "/home/admin/.trash/pho:8b69da2b-2a10-4a82-89bc-a376e52d5482" + "/PAZReport.xanalyzer" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    String fileId = repositoryProvider.getTrashFileId( path );
+    RepositoryFile nativeFile = createNativeFile( fileId, path, false );
+    doThrow( new InternalError() ).when( fileServiceMock ).doRestoreFiles( any() );
+    doReturn( nativeFile ).when( repositoryMock ).getFileById( fileId );
+    // Deleted item is found but the caller lacks WRITE access on the restore target.
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( nativeFile.getPath() ), any() );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.restoreFile( path ) );
+    verify( fileServiceMock ).doRestoreFiles( fileId );
   }
 
   @Test
@@ -1308,14 +1537,18 @@ class RepositoryFileProviderTest {
       GenericFilePath.parse( "/home/admin/.trash/pho:8b69da2b-2a10-4a82-89bc-a376e52d5482" + "/PAZReport.xanalyzer" );
 
     FileService fileServiceMock = mock( FileService.class );
-    doNothing().when( fileServiceMock ).doRestoreFiles( any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
+    String fileId = repositoryProvider.getTrashFileId( path );
+    RepositoryFile nativeFile = createNativeFile( fileId, path, false );
     doThrow( new InternalError() ).when( fileServiceMock ).doRestoreFiles( any() );
+    doReturn( nativeFile ).when( repositoryMock ).getFileById( fileId );
+    // Deleted item is found but the caller lacks WRITE access on the restore target.
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( nativeFile.getPath() ), any() );
 
     assertThrows( OperationFailedException.class, () -> repositoryProvider.restoreFile( path ) );
-    verify( fileServiceMock ).doRestoreFiles( repositoryProvider.getTrashFileId( path ) );
+    verify( fileServiceMock ).doRestoreFiles( fileId );
   }
   // endregion
 
@@ -1908,6 +2141,7 @@ class RepositoryFileProviderTest {
     doReturn( true ).when( fileServiceMock ).isValidFileName( newName, true );
     doReturn( true ).when( fileServiceMock ).doRename( encodeRepositoryPath( path.toString() ), newName );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
     GenericFilePath newPath = repositoryProvider.getNewPath( path.getParent(), newName );
@@ -1933,6 +2167,7 @@ class RepositoryFileProviderTest {
     doThrow( new IllegalArgumentException( "rename failed" ) ).when( fileServiceMock )
       .doRename( encodeRepositoryPath( path.toString() ), newName );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
     GenericFilePath newPath = repositoryProvider.getNewPath( path.getParent(), newName + ".xanalyzer" );
@@ -1957,6 +2192,7 @@ class RepositoryFileProviderTest {
     doReturn( true ).when( fileServiceMock ).isValidFileName( newName, true );
     doReturn( false ).when( fileServiceMock ).doRename( encodeRepositoryPath( path.toString() ), newName );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
     GenericFilePath newPath = repositoryProvider.getNewPath( path.getParent(), newName + ".xanalyzer" );
@@ -2010,6 +2246,7 @@ class RepositoryFileProviderTest {
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
     doReturn( false ).when( fileServiceMock ).isValidFileName( newName, true );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
     assertThrows( InvalidOperationException.class, () -> repositoryProvider.renameFile( path, newName ) );
@@ -2027,6 +2264,7 @@ class RepositoryFileProviderTest {
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
     doReturn( true ).when( fileServiceMock ).isValidFileName( newName, true );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
     GenericFilePath newPath = repositoryProvider.getNewPath( path.getParent(), newName + ".xanalyzer" );
@@ -2053,6 +2291,8 @@ class RepositoryFileProviderTest {
     doThrow( new UnifiedRepositoryAccessDeniedException( "Not Authorized" ) ).when( fileServiceMock )
       .doRename( encodeRepositoryPath( path.toString() ), newName );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
     GenericFilePath newPath = repositoryProvider.getNewPath( path.getParent(), newName + ".xanalyzer" );
@@ -2060,6 +2300,30 @@ class RepositoryFileProviderTest {
 
     assertThrows( AccessControlException.class, () -> repositoryProvider.renameFile( path, newName ) );
 
+    verify( fileServiceMock ).doRename( encodeRepositoryPath( path.toString() ), newName );
+  }
+
+  @Test
+  void testRenameFileResourceAccessDenied() throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+    String newName = "renamed.xanalyzer";
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( true ).when( fileServiceMock ).isValidFileName( newName, true );
+    doThrow( new UnifiedRepositoryAccessDeniedException() ).when( fileServiceMock )
+      .doRename( encodeRepositoryPath( path.toString() ), newName );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    GenericFilePath newPath = repositoryProvider.getNewPath( path.getParent(), newName );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.renameFile( path, newName ) );
     verify( fileServiceMock ).doRename( encodeRepositoryPath( path.toString() ), newName );
   }
 
@@ -2075,6 +2339,7 @@ class RepositoryFileProviderTest {
     doReturn( true ).when( fileServiceMock ).isValidFileName( newName, true );
     doReturn( true ).when( fileServiceMock ).doRename( encodeRepositoryPath( path.toString() ), newName );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( fileId, path, true ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
     // No extension, so fullNewName == newName.
@@ -2100,6 +2365,7 @@ class RepositoryFileProviderTest {
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( destPath.toString() ) );
     doNothing().when( fileServiceMock ).doCopyFiles( any(), any(), any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
@@ -2124,7 +2390,26 @@ class RepositoryFileProviderTest {
 
     NotFoundException exception =
       assertThrows( NotFoundException.class, () -> repositoryProvider.copyFile( path, destPath ) );
-    assertEquals( String.format( "Destination folder not found '%s'.", destPath ), exception.getMessage() );
+    assertEquals( String.format( "Path not found '%s'.", destPath ), exception.getMessage() );
+    verify( fileServiceMock, never() ).doCopyFiles( any(), any(), any() );
+  }
+
+  @Test
+  void testCopyFilesDestinationPathIsNotFolder() throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+    GenericFilePath destPath = GenericFilePath.parse( "/archive/not-folder" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "dest-id", destPath, false ) ).when( repositoryMock ).getFile( destPath.toString() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    InvalidOperationException exception =
+      assertThrows( InvalidOperationException.class, () -> repositoryProvider.copyFile( path, destPath ) );
+
+    assertEquals( "The destination path is not a folder.", exception.getMessage() );
     verify( fileServiceMock, never() ).doCopyFiles( any(), any(), any() );
   }
 
@@ -2156,6 +2441,8 @@ class RepositoryFileProviderTest {
     doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( destPath.toString() ) );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
@@ -2195,13 +2482,43 @@ class RepositoryFileProviderTest {
     doThrow( new UnifiedRepositoryAccessDeniedException( "Access Denied" ) ).when( fileServiceMock )
       .doCopyFiles( any(), any(), any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( destPath.toString() ), any() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
     doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
 
     assertThrows( AccessControlException.class, () -> repositoryProvider.copyFile( path, destPath ) );
     verify( fileServiceMock ).doCopyFiles( any(), any(), any() );
+  }
+
+  @Test
+  void testCopyFilesAccessDeniedWhenSourceDisappearsThrowsNotFound() throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+    GenericFilePath destPath = GenericFilePath.parse( "/archive/" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( destPath.toString() ) );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "Access Denied" ) ).when( fileServiceMock )
+      .doCopyFiles( any(), any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
+    doReturn( createNativeFile( fileId, path, false ) ).doReturn( null )
+      .when( repositoryMock ).getFile( path.toString() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+    GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+
+    NotFoundException ex = assertThrows( NotFoundException.class, () -> repositoryProvider.copyFile( path, destPath ) );
+
+    assertEquals( String.format( "Path not found '%s'.", path ), ex.getMessage() );
+    verify( fileServiceMock ).doCopyFiles( any(), any(), any() );
+    verify( repositoryMock, never() ).hasAccess( eq( destPath.toString() ), any() );
   }
 
   @Test
@@ -2216,6 +2533,7 @@ class RepositoryFileProviderTest {
     doThrow( new IllegalArgumentException( "copy failed" ) ).when( fileServiceMock )
       .doCopyFiles( any(), any(), any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
@@ -2236,12 +2554,62 @@ class RepositoryFileProviderTest {
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( destPath.toString() ) );
     doThrow( new RuntimeException( "copy failed" ) ).when( fileServiceMock ).doCopyFiles( any(), any(), any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
     doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
 
     assertThrows( Exception.class, () -> repositoryProvider.copyFile( path, destPath ) );
+    verify( fileServiceMock ).doCopyFiles( any(), any(), any() );
+  }
+
+  @Test
+  void testCopyFilesUnifiedRepositoryExceptionResourceAccessDeniedOnDestination() throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+    GenericFilePath destPath = GenericFilePath.parse( "/archive/" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( destPath.toString() ) );
+    doThrow( new UnifiedRepositoryAccessDeniedException() ).when( fileServiceMock ).doCopyFiles( any(), any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
+    // Source is found and readable, but the destination is not writable.
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( destPath.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+    GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.copyFile( path, destPath ) );
+    verify( fileServiceMock ).doCopyFiles( any(), any(), any() );
+  }
+
+  @Test
+  void testCopyFilesUnifiedRepositoryExceptionFallsBackToOperationFailed() throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+    GenericFilePath destPath = GenericFilePath.parse( "/archive/" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( destPath.toString() ) );
+    doThrow( new UnifiedRepositoryException() ).when( fileServiceMock ).doCopyFiles( any(), any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
+    // Source found/readable and destination writable: neither follow-up reproduces the failure.
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( destPath.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+    GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
+
+    OperationFailedException ex =
+      assertThrows( OperationFailedException.class, () -> repositoryProvider.copyFile( path, destPath ) );
+    assertEquals( OperationFailedException.class, ex.getClass() );
     verify( fileServiceMock ).doCopyFiles( any(), any(), any() );
   }
   // endregion
@@ -2257,6 +2625,7 @@ class RepositoryFileProviderTest {
     doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
     doNothing().when( fileServiceMock ).doMoveFiles( any(), any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
@@ -2277,12 +2646,32 @@ class RepositoryFileProviderTest {
     doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
     doThrow( new UnifiedRepositoryException() ).when( fileServiceMock ).doMoveFiles( any(), any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
 
     assertThrows( ConflictException.class, () -> repositoryProvider.moveFile( path, destPath ) );
+    verify( fileServiceMock, never() ).doMoveFiles( any(), any() );
+  }
+
+  @Test
+  void testMoveFilesDestinationPathIsNotFolder() throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+    GenericFilePath destPath = GenericFilePath.parse( "/archive/not-folder" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "dest-id", destPath, false ) ).when( repositoryMock ).getFile( destPath.toString() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    InvalidOperationException exception =
+      assertThrows( InvalidOperationException.class, () -> repositoryProvider.moveFile( path, destPath ) );
+
+    assertEquals( "The destination path is not a folder.", exception.getMessage() );
     verify( fileServiceMock, never() ).doMoveFiles( any(), any() );
   }
 
@@ -2295,6 +2684,7 @@ class RepositoryFileProviderTest {
     FileService fileServiceMock = mock( FileService.class );
     doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     doReturn( null ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
@@ -2312,8 +2702,12 @@ class RepositoryFileProviderTest {
 
     FileService fileServiceMock = mock( FileService.class );
     doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
     doThrow( UnifiedRepositoryAccessDeniedException.class ).when( fileServiceMock ).doMoveFiles( any(), any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( destPath.toString() ), any() );
     doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
@@ -2333,12 +2727,80 @@ class RepositoryFileProviderTest {
     doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
     doThrow( new FileNotFoundException() ).when( fileServiceMock ).doMoveFiles( any(), any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
     doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
 
     assertThrows( NotFoundException.class, () -> repositoryProvider.moveFile( path, destPath ) );
+    verify( fileServiceMock ).doMoveFiles( any(), any() );
+  }
+
+  @Test
+  void testMoveFilesUnifiedRepositoryAccessDeniedExceptionNotFoundSource() throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+    GenericFilePath destPath = GenericFilePath.parse( "/archive/" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doThrow( new UnifiedRepositoryAccessDeniedException() ).when( fileServiceMock ).doMoveFiles( any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
+    doReturn( createNativeFile( fileId, path, false ) ).doReturn( null )
+      .when( repositoryMock ).getFile( path.toString() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+    GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
+
+    assertThrows( NotFoundException.class, () -> repositoryProvider.moveFile( path, destPath ) );
+    verify( fileServiceMock ).doMoveFiles( any(), any() );
+  }
+
+  @Test
+  void testMoveFilesUnifiedRepositoryAccessDeniedExceptionResourceAccessDeniedOnSource() throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+    GenericFilePath destPath = GenericFilePath.parse( "/archive/" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doThrow( new UnifiedRepositoryAccessDeniedException() ).when( fileServiceMock ).doMoveFiles( any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+    GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.moveFile( path, destPath ) );
+    verify( fileServiceMock ).doMoveFiles( any(), any() );
+  }
+
+  @Test
+  void testMoveFilesUnifiedRepositoryAccessDeniedExceptionResourceAccessDeniedOnDestination() throws Exception {
+    String fileId = "8b69da2b-2a10-4a82-89bc-a376e52d5482";
+    GenericFilePath path = GenericFilePath.parse( "/home/admin/" + fileId + "/PAZReport.xanalyzer" );
+    GenericFilePath destPath = GenericFilePath.parse( "/archive/" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doThrow( new UnifiedRepositoryAccessDeniedException() ).when( fileServiceMock ).doMoveFiles( any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
+    doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+    GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( newPath.toString() ) );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( destPath.toString() ), any() );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.moveFile( path, destPath ) );
     verify( fileServiceMock ).doMoveFiles( any(), any() );
   }
 
@@ -2371,6 +2833,7 @@ class RepositoryFileProviderTest {
     doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
     doThrow( new InternalError() ).when( fileServiceMock ).doMoveFiles( any(), any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
@@ -2390,6 +2853,7 @@ class RepositoryFileProviderTest {
     doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
     doThrow( new RuntimeException() ).when( fileServiceMock ).doMoveFiles( any(), any() );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "destId", destPath, true ) ).when( repositoryMock ).getFile( destPath.toString() );
     doReturn( createNativeFile( fileId, path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
     GenericFilePath newPath = repositoryProvider.getNewPath( destPath, path.getLastSegment() );
@@ -2525,9 +2989,13 @@ class RepositoryFileProviderTest {
 
     FileService fileServiceMock = mock( FileService.class );
     doNothing().when( fileServiceMock ).doSetMetadata( any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider =
-      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock );
+      new RepositoryFileProvider( repositoryMock, fileServiceMock );
     List<StringKeyStringValueDto> nativeMetadata = repositoryProvider.convertToNativeFileMetadata( metadata );
+
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
 
     repositoryProvider.setFileMetadata( path, metadata );
 
@@ -2551,8 +3019,12 @@ class RepositoryFileProviderTest {
 
     FileService fileServiceMock = mock( FileService.class );
     doNothing().when( fileServiceMock ).doSetMetadata( any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider =
-      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock );
+      new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
 
     repositoryProvider.setFileMetadata( path, null );
 
@@ -2573,8 +3045,12 @@ class RepositoryFileProviderTest {
 
     FileService fileServiceMock = mock( FileService.class );
     doNothing().when( fileServiceMock ).doSetMetadata( any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider =
-      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock );
+      new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
 
     repositoryProvider.setFileMetadata( path, metadata );
 
@@ -2596,8 +3072,12 @@ class RepositoryFileProviderTest {
 
     FileService fileServiceMock = mock( FileService.class );
     doThrow( GeneralSecurityException.class ).when( fileServiceMock ).doSetMetadata( any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider =
-      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock );
+      new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
 
     assertThrows( AccessControlException.class, () -> repositoryProvider.setFileMetadata( path, metadata ) );
   }
@@ -2611,10 +3091,63 @@ class RepositoryFileProviderTest {
 
     FileService fileServiceMock = mock( FileService.class );
     doThrow( new RuntimeException( "set metadata failed" ) ).when( fileServiceMock ).doSetMetadata( any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    RepositoryFileProvider repositoryProvider =
+      new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+
+    assertThrows( RuntimeException.class, () -> repositoryProvider.setFileMetadata( path, metadata ) );
+  }
+
+  @Test
+  void testSetFileMetadataNotFound() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/testFile1" );
+    BaseGenericFileMetadata metadata = new BaseGenericFileMetadata();
+    metadata.addMetadatum( "key1", "value1" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
     RepositoryFileProvider repositoryProvider =
       new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock );
 
-    assertThrows( RuntimeException.class, () -> repositoryProvider.setFileMetadata( path, metadata ) );
+    assertThrows( NotFoundException.class, () -> repositoryProvider.setFileMetadata( path, metadata ) );
+    verify( fileServiceMock, never() ).doSetMetadata( anyString(), any() );
+  }
+
+  @Test
+  void testSetFileMetadataAccessControlException() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/testFile1" );
+    BaseGenericFileMetadata metadata = new BaseGenericFileMetadata();
+    metadata.addMetadatum( "key1", "value1" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doThrow( UnifiedRepositoryAccessDeniedException.class ).when( fileServiceMock ).doSetMetadata( any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    assertThrows( AccessControlException.class, () -> repositoryProvider.setFileMetadata( path, metadata ) );
+  }
+
+  @Test
+  void testSetFileMetadataResourceAccessDeniedException() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/testFile1" );
+    BaseGenericFileMetadata metadata = new BaseGenericFileMetadata();
+    metadata.addMetadatum( "key1", "value1" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doThrow( UnifiedRepositoryAccessDeniedException.class ).when( fileServiceMock ).doSetMetadata( any(), any() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.setFileMetadata( path, metadata ) );
   }
   // endregion
 
@@ -2630,8 +3163,10 @@ class RepositoryFileProviderTest {
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
     doReturn( nativeAcl ).when( fileServiceMock )
       .doGetFileAcl( encodeRepositoryPath( path.toString() ), forceInheriting );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = spy(
-      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock ) );
+      new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
     doReturn( acl ).when( repositoryProvider ).convertFromNativeFileAcl( nativeAcl );
 
     IGenericFileAcl result = repositoryProvider.getFileAcl( path, forceInheriting );
@@ -2664,8 +3199,10 @@ class RepositoryFileProviderTest {
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
     doThrow( UnifiedRepositoryAccessDeniedException.class ).when( fileServiceMock )
       .doGetFileAcl( encodeRepositoryPath( path.toString() ), forceInheriting );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider =
-      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock );
+      new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
     assertThrows( AccessControlException.class, () -> repositoryProvider.getFileAcl( path, forceInheriting ) );
   }
@@ -2677,8 +3214,10 @@ class RepositoryFileProviderTest {
 
     FileService fileServiceMock = mock( FileService.class );
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider = spy(
-      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock ) );
+      new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
     doThrow( InvalidOperationException.class ).when( repositoryProvider ).convertFromNativeFileAcl( any() );
 
     assertThrows( InvalidOperationException.class, () -> repositoryProvider.getFileAcl( path, forceInheriting ) );
@@ -2693,8 +3232,10 @@ class RepositoryFileProviderTest {
     doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
     doThrow( new RuntimeException( "acl failed" ) ).when( fileServiceMock )
       .doGetFileAcl( encodeRepositoryPath( path.toString() ), forceInheriting );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( createNativeFile( "fileId", path, false ) ).when( repositoryMock ).getFile( path.toString() );
     RepositoryFileProvider repositoryProvider =
-      new RepositoryFileProvider( mock( IUnifiedRepository.class ), fileServiceMock );
+      new RepositoryFileProvider( repositoryMock, fileServiceMock );
 
     assertThrows( OperationFailedException.class, () -> repositoryProvider.getFileAcl( path, forceInheriting ) );
   }
@@ -2768,6 +3309,60 @@ class RepositoryFileProviderTest {
   }
 
   @Test
+  void testSetFileAclAccessControlWhenResourceExistenceCannotBeConfirmed() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/testFile1" );
+    IGenericFileAcl acl = mock( IGenericFileAcl.class );
+    RepositoryFileAclDto nativeAcl = mock( RepositoryFileAclDto.class );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( UnifiedRepositoryAccessDeniedException.class ).when( fileServiceMock ).setFileAcls( any(), any() );
+    doReturn( false ).when( fileServiceMock ).doesExist( path.toString() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( nativeAcl ).when( repositoryProvider ).convertToNativeFileAcl( acl );
+    doReturn( true ).when( repositoryProvider ).validateFileAcl( acl );
+
+    assertThrows( AccessControlException.class, () -> repositoryProvider.setFileAcl( path, acl ) );
+    verify( repositoryMock, never() ).hasAccess( anyString(), any() );
+  }
+
+  @Test
+  void testSetFileAclUnifiedRepositoryExceptionOperationFailed() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/testFile1" );
+    IGenericFileAcl acl = mock( IGenericFileAcl.class );
+    RepositoryFileAclDto nativeAcl = mock( RepositoryFileAclDto.class );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( UnifiedRepositoryException.class ).when( fileServiceMock ).setFileAcls( any(), any() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( nativeAcl ).when( repositoryProvider ).convertToNativeFileAcl( acl );
+    doReturn( true ).when( repositoryProvider ).validateFileAcl( acl );
+
+    assertThrows( OperationFailedException.class, () -> repositoryProvider.setFileAcl( path, acl ) );
+  }
+
+  @Test
+  void testSetFileAclUnifiedRepositoryExceptionPathNotFound() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/testFile1" );
+    IGenericFileAcl acl = mock( IGenericFileAcl.class );
+    RepositoryFileAclDto nativeAcl = mock( RepositoryFileAclDto.class );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( UnifiedRepositoryException.class ).when( fileServiceMock ).setFileAcls( any(), any() );
+    doReturn( false ).when( fileServiceMock ).doesExist( path.toString() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( nativeAcl ).when( repositoryProvider ).convertToNativeFileAcl( acl );
+    doReturn( true ).when( repositoryProvider ).validateFileAcl( acl );
+
+    assertThrows( OperationFailedException.class, () -> repositoryProvider.setFileAcl( path, acl ) );
+    verify( repositoryMock, never() ).hasAccess( anyString(), any() );
+  }
+
+  @Test
   void testSetFileAclOperationFailedException() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/testFile1" );
     IGenericFileAcl acl = mock( IGenericFileAcl.class );
@@ -2782,6 +3377,48 @@ class RepositoryFileProviderTest {
       .setFileAcls( encodeRepositoryPath( path.toString() ), nativeAcl );
 
     assertThrows( OperationFailedException.class, () -> repositoryProvider.setFileAcl( path, acl ) );
+  }
+
+  @Test
+  void testSetFileAclResourceAccessDenied() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/testFile1" );
+    IGenericFileAcl acl = mock( IGenericFileAcl.class );
+    RepositoryFileAclDto nativeAcl = mock( RepositoryFileAclDto.class );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( UnifiedRepositoryException.class ).when( fileServiceMock ).setFileAcls( any(), any() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    // File is found/readable but the caller lacks ACL_MANAGEMENT on it: per-file gate, not the ABS-level check.
+    doReturn( createNativeFile( "id", path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( nativeAcl ).when( repositoryProvider ).convertToNativeFileAcl( acl );
+    doReturn( true ).when( repositoryProvider ).validateFileAcl( acl );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.setFileAcl( path, acl ) );
+  }
+
+  @Test
+  void testSetFileAclAccessControlWhenAbsLevel() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/testFile1" );
+    IGenericFileAcl acl = mock( IGenericFileAcl.class );
+    RepositoryFileAclDto nativeAcl = mock( RepositoryFileAclDto.class );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( UnifiedRepositoryAccessDeniedException.class ).when( fileServiceMock ).setFileAcls( any(), any() );
+    doReturn( true ).when( fileServiceMock ).doesExist( path.toString() );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    // File is found/readable and the caller can manage its ACL: the denial was the coarse ABS-level check.
+    doReturn( createNativeFile( "id", path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( nativeAcl ).when( repositoryProvider ).convertToNativeFileAcl( acl );
+    doReturn( true ).when( repositoryProvider ).validateFileAcl( acl );
+
+    AccessControlException ex =
+      assertThrows( AccessControlException.class, () -> repositoryProvider.setFileAcl( path, acl ) );
+    assertEquals( AccessControlException.class, ex.getClass() );
   }
   // endregion
 
@@ -3136,11 +3773,84 @@ class RepositoryFileProviderTest {
     assertThrows( InvalidPathException.class, () -> repositoryProvider.createFolder( path ) );
     verify( fileServiceMock ).doCreateDirSafe( encodeRepositoryPath( path.toString() ) );
   }
+
+  @ParameterizedTest
+  @ValueSource( strings = { "/public/newFolder", "/" } )
+  void testCreateFolderResourceAccessDeniedOnAncestor( String pathToTest ) throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/newFolder/sub" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( new UnifiedRepositoryException() ).when( fileServiceMock )
+      .doCreateDirSafe( encodeRepositoryPath( path.toString() ) );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( pathToTest ) );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( pathToTest ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.createFolder( path ) );
+    verify( fileServiceMock ).doCreateDirSafe( encodeRepositoryPath( path.toString() ) );
+  }
+
+  @Test
+  void testCreateFolderResourceAccessDeniedWhenFirstChildIsNotWritable() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/newFolder/sub" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( new UnifiedRepositoryException() ).when( fileServiceMock )
+      .doCreateDirSafe( encodeRepositoryPath( path.toString() ) );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( "/public" ) );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( "/public" ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    assertThrows( ResourceAccessDeniedException.class, () -> repositoryProvider.createFolder( path ) );
+    verify( fileServiceMock ).doCreateDirSafe( encodeRepositoryPath( path.toString() ) );
+  }
+
+  @Test
+  void testCreateFolderFallsBackToOperationFailed() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/newFolder/sub" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( new UnifiedRepositoryException() ).when( fileServiceMock )
+      .doCreateDirSafe( encodeRepositoryPath( path.toString() ) );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( "/public" ) );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( "/public" ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    OperationFailedException ex =
+      assertThrows( OperationFailedException.class, () -> repositoryProvider.createFolder( path ) );
+    assertEquals( OperationFailedException.class, ex.getClass() );
+    verify( fileServiceMock ).doCreateDirSafe( encodeRepositoryPath( path.toString() ) );
+  }
+
+  @Test
+  void testCreateFolderFallsBackToOperationFailedWhenClosestExistingAncestorIsWritable() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/newFolder/sub" );
+
+    FileService fileServiceMock = mock( FileService.class );
+    doThrow( new UnifiedRepositoryException() ).when( fileServiceMock )
+      .doCreateDirSafe( encodeRepositoryPath( path.toString() ) );
+    // Closest existing ancestor is writable.
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( "/public" ) );
+    // Higher ancestor is denied, but should not affect the outcome.
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( "/" ) );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( "/public" ), any() );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( "/" ), any() );
+    RepositoryFileProvider repositoryProvider = new RepositoryFileProvider( repositoryMock, fileServiceMock );
+
+    OperationFailedException ex =
+      assertThrows( OperationFailedException.class, () -> repositoryProvider.createFolder( path ) );
+    assertEquals( OperationFailedException.class, ex.getClass() );
+    verify( fileServiceMock ).doCreateDirSafe( encodeRepositoryPath( path.toString() ) );
+  }
   // endregion
 
   // region createFile
   @Test
-  void testCreateFileCoreThrowsAccessControlExceptionWhenCannotCreate() throws Exception {
+  void testCreateFileThrowsAccessControlExceptionWhenCannotCreate() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/newFile.txt" );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
     FileService fileServiceMock = mock( FileService.class );
@@ -3155,7 +3865,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreThrowsInvalidPathExceptionWhenPathIsInvalid() throws Exception {
+  void testCreateFileThrowsInvalidPathExceptionWhenPathIsInvalid() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/invalid\0file.txt" );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
     FileService fileServiceMock = mock( FileService.class );
@@ -3171,7 +3881,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreReturnsFalseWhenFileExistsAndNoOverwrite() throws Exception {
+  void testCreateFileReturnsFalseWhenFileExistsAndNoOverwrite() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/existingFile.txt" );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
     FileService fileServiceMock = mock( FileService.class );
@@ -3195,7 +3905,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreThrowsInvalidOperationExceptionWhenExistingPathIsFolder() throws Exception {
+  void testCreateFileThrowsInvalidOperationExceptionWhenExistingPathIsFolder() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/existingFolder" );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
     FileService fileServiceMock = mock( FileService.class );
@@ -3218,7 +3928,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreUpdatesExistingFileWhenOverwriteEnabled() throws Exception {
+  void testCreateFileUpdatesExistingFileWhenOverwriteEnabled() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/existingFile.txt" );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
     FileService fileServiceMock = mock( FileService.class );
@@ -3240,7 +3950,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreCreatesFileWhenFileDoesNotExist() throws Exception {
+  void testCreateFileCreatesFileWhenFileDoesNotExist() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/newFile.txt" );
     GenericFilePath parentPath = path.getParent();
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
@@ -3271,7 +3981,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreThrowsAccessControlExceptionOnUnifiedRepositoryAccessDenied() throws Exception {
+  void testCreateFileThrowsAccessControlExceptionOnUnifiedRepositoryAccessDenied() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/newFile.txt" );
     GenericFilePath parentPath = path.getParent();
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
@@ -3288,6 +3998,9 @@ class RepositoryFileProviderTest {
     // createFile throws access denied
     doThrow( new UnifiedRepositoryAccessDeniedException( "denied" ) )
       .when( repositoryMock ).createFile( any(), any(), any(), anyString() );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( parentPath.toString() ) );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( parentPath.toString() ), any() );
 
     RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
     doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
@@ -3298,7 +4011,29 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreThrowsOperationFailedExceptionOnUnifiedRepositoryException() throws Exception {
+  void testCreateFileThrowsAccessControlExceptionOnUnifiedRepositoryAccessDeniedWhenParentPathIsNull()
+    throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/" );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+
+    RepositoryFile existingFile = createNativeFile( "rootId", path, false );
+    doReturn( existingFile ).when( repositoryMock ).getFile( path.toString() );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "denied" ) )
+      .when( repositoryMock ).updateFile( any(), any(), anyString() );
+    doReturn( false ).when( fileServiceMock ).doesExist( path.toString() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+
+    assertThrows( AccessControlException.class,
+      () -> repositoryProvider.createFile( path, mock( InputStream.class ), new CreateFileOptions( true ) ) );
+  }
+
+  @Test
+  void testCreateFileThrowsOperationFailedExceptionOnUnifiedRepositoryException() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/newFile.txt" );
     GenericFilePath parentPath = path.getParent();
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
@@ -3325,7 +4060,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreThrowsOperationFailedExceptionWhenCreateFileReturnsNull() throws Exception {
+  void testCreateFileThrowsOperationFailedExceptionWhenCreateFileReturnsNull() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/newFile.txt" );
     GenericFilePath parentPath = path.getParent();
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
@@ -3370,7 +4105,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreThrowsAccessControlExceptionWhenGetNativeFileThrowsAccessDenied() throws Exception {
+  void testCreateFileThrowsAccessControlExceptionWhenGetNativeFileThrowsAccessDenied() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/restricted.txt" );
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
     FileService fileServiceMock = mock( FileService.class );
@@ -3390,7 +4125,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreUsesLastSegmentAsFileName() throws Exception {
+  void testCreateFileUsesLastSegmentAsFileName() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/subfolder/report.xml" );
     GenericFilePath parentPath = path.getParent();
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
@@ -3475,7 +4210,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreCreatesParentFolderWhenParentFolderDoesNotExist() throws Exception {
+  void testCreateFileCreatesParentFolderWhenParentFolderDoesNotExist() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/nonExistentFolder/newFile.txt" );
     GenericFilePath parentPath = path.getParent();
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
@@ -3506,7 +4241,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCoreThrowsResourceAccessDeniedExceptionWhenParentFolderAccessDenied() throws Exception {
+  void testCreateFileThrowsResourceAccessDeniedExceptionWhenParentFolderAccessDenied() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/public/restricted/newFile.txt" );
     GenericFilePath parentPath = path.getParent();
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
@@ -3533,7 +4268,7 @@ class RepositoryFileProviderTest {
   }
 
   @Test
-  void testCreateFileCorePassesParentIdToCreateFile() throws Exception {
+  void testCreateFilePassesParentIdToCreateFile() throws Exception {
     GenericFilePath path = GenericFilePath.parse( "/home/admin/data.csv" );
     GenericFilePath parentPath = path.getParent();
     IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
@@ -3608,6 +4343,175 @@ class RepositoryFileProviderTest {
       () -> repositoryProvider.createFile( path, inputStream, options ) );
 
     assertNotNull( exception.getCause() );
+  }
+
+  @Test
+  void testCreateFileResourceAccessDeniedOnParentWrite() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/newFile.txt" );
+    GenericFilePath parentPath = path.getParent();
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+    doReturn( true ).when( fileServiceMock ).isValidFileName( path.getLastSegment(), true );
+
+    // File does not exist; parent exists but is not writable.
+    doReturn( null ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( createNativeFile( "parentId", parentPath, true ) ).when( repositoryMock )
+      .getFile( parentPath.toString() );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "error" ) ).when( repositoryMock )
+      .createFile( any(), any(), any(), anyString() );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( parentPath.toString() ) );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( parentPath.toString() ), any() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+    doReturn( "text/plain" ).when( repositoryProvider ).detectMimeType( any(), eq( path ) );
+    InputStream inputStream = mock( InputStream.class );
+    CreateFileOptions options = new CreateFileOptions( false );
+
+    assertThrows( ResourceAccessDeniedException.class,
+      () -> repositoryProvider.createFile( path, inputStream, options ) );
+  }
+
+  @Test
+  void testCreateFileUpdateResourceAccessDeniedOnFileWrite() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/existingFile.txt" );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+
+    // File exists but is not writable; update fails generically.
+    doReturn( createNativeFile( "fileId1", path, false ) ).when( repositoryMock ).getFile( path.toString() );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "error" ) ).when( repositoryMock )
+      .updateFile( any(), any(), anyString() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+    doReturn( "text/plain" ).when( repositoryProvider ).detectMimeType( any(), eq( path ) );
+    InputStream inputStream = mock( InputStream.class );
+    CreateFileOptions options = new CreateFileOptions( true );
+
+    assertThrows( ResourceAccessDeniedException.class,
+      () -> repositoryProvider.createFile( path, inputStream, options ) );
+  }
+
+  @Test
+  void testCreateFileCreatePathResourceAccessDeniedWhenFileExistsAndNotWritable() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/newFile.txt" );
+    GenericFilePath parentPath = path.getParent();
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+    doReturn( true ).when( fileServiceMock ).isValidFileName( path.getLastSegment(), true );
+
+    // Create path: file not found initially.
+    doReturn( null ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( createNativeFile( "parentId", parentPath, true ) ).when( repositoryMock )
+      .getFile( parentPath.toString() );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "error" ) ).when( repositoryMock )
+      .createFile( any(), any(), any(), anyString() );
+
+    // At catch-time, file now exists but is not writable -> hit top disambiguation branch.
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+
+    assertThrows( ResourceAccessDeniedException.class,
+      () -> repositoryProvider.createFile( path, mock( InputStream.class ), new CreateFileOptions( false ) ) );
+  }
+
+  @Test
+  void testCreateFileCreatePathFallsThroughWhenFileExistsButIsWritable() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/newFile.txt" );
+    GenericFilePath parentPath = path.getParent();
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+    doReturn( true ).when( fileServiceMock ).isValidFileName( path.getLastSegment(), true );
+
+    // Create path: file not found initially.
+    doReturn( null ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( createNativeFile( "parentId", parentPath, true ) ).when( repositoryMock )
+      .getFile( parentPath.toString() );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "error" ) ).when( repositoryMock )
+      .createFile( any(), any(), any(), anyString() );
+
+    // At catch-time: file exists AND is writable -> first operand true, second (!canWrite) false,
+    // so the whole condition is false and execution falls through to the parent-path logic.
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+
+    // Parent exists and is writable -> ends up throwing AccessControlException.
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( parentPath.toString() ) );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( parentPath.toString() ), any() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+
+    assertThrows( AccessControlException.class,
+      () -> repositoryProvider.createFile( path, mock( InputStream.class ), new CreateFileOptions( false ) ) );
+  }
+
+  @Test
+  void testCreateFileThrowsNotFoundWhenParentMissingAfterRepositoryFailure() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/newFile.txt" );
+    GenericFilePath parentPath = path.getParent();
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+    doReturn( true ).when( fileServiceMock ).isValidFileName( path.getLastSegment(), true );
+
+    doReturn( null ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( createNativeFile( "parentId", parentPath, true ) ).when( repositoryMock )
+      .getFile( parentPath.toString() );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "error" ) ).when( repositoryMock )
+      .createFile( any(), any(), any(), anyString() );
+    doReturn( false ).when( fileServiceMock ).doesExist( path.toString() );
+    doReturn( createNativeFile( "parentId", parentPath, true ) ).doReturn( null ).when( repositoryMock )
+      .getFile( parentPath.toString() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+
+    assertThrows( NotFoundException.class,
+      () -> repositoryProvider.createFile( path, mock( InputStream.class ), new CreateFileOptions( false ) ) );
+  }
+
+  @Test
+  void testCreateFileThrowsOperationFailedWhenParentWritableAfterRepositoryFailure() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/newFile.txt" );
+    GenericFilePath parentPath = path.getParent();
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( "true" ).when( fileServiceMock ).doGetCanCreate();
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+    doReturn( true ).when( fileServiceMock ).isValidFileName( path.getLastSegment(), true );
+
+    doReturn( null ).when( repositoryMock ).getFile( path.toString() );
+    doReturn( createNativeFile( "parentId", parentPath, true ) ).when( repositoryMock )
+      .getFile( parentPath.toString() );
+    doThrow( new UnifiedRepositoryException( "error" ) ).when( repositoryMock )
+      .createFile( any(), any(), any(), anyString() );
+    doReturn( false ).when( fileServiceMock ).doesExist( path.toString() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( parentPath.toString() ) );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( parentPath.toString() ), any() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+
+    OperationFailedException exception = assertThrows( OperationFailedException.class,
+      () -> repositoryProvider.createFile( path, mock( InputStream.class ), new CreateFileOptions( false ) ) );
+    assertEquals( OperationFailedException.class, exception.getClass() );
   }
   // endregion
 
@@ -3712,6 +4616,33 @@ class RepositoryFileProviderTest {
     doReturn( existingFile ).when( repositoryMock ).getFile( path.toString() );
     doThrow( new UnifiedRepositoryAccessDeniedException( "denied" ) )
       .when( repositoryMock ).updateFile( any(), any(), anyString() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+    GenericFilePath parentPath = path.getParent();
+    doReturn( createNativeFile( "parentId", parentPath, true ) ).when( repositoryMock )
+      .getFile( parentPath.toString() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( parentPath.toString() ) );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( parentPath.toString() ), any() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+
+    assertThrows( AccessControlException.class,
+      () -> repositoryProvider.setFileContent( path, mock( InputStream.class ) ) );
+  }
+
+  @Test
+  void testSetFileContentCoreThrowsAccessControlExceptionWhenUpdateDeniedAndParentPathIsNull() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/" );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+
+    RepositoryFile existingFile = createNativeFile( "rootId", path, false );
+    doReturn( existingFile ).when( repositoryMock ).getFile( path.toString() );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "denied" ) )
+      .when( repositoryMock ).updateFile( any(), any(), anyString() );
+    doReturn( false ).when( fileServiceMock ).doesExist( path.toString() );
 
     RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
     doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
@@ -3755,6 +4686,98 @@ class RepositoryFileProviderTest {
     assertThrows( OperationFailedException.class,
       () -> repositoryProvider.setFileContent( path, mock( InputStream.class ) ) );
     verify( repositoryMock, never() ).updateFile( any(), any(), anyString() );
+  }
+
+  @Test
+  void testSetFileContentCoreResourceAccessDeniedWhenNotWritable() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/existingFile.txt" );
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+
+    // File exists but is not writable; update fails generically.
+    RepositoryFile existingFile = createNativeFile( "fileId", path, false );
+    doReturn( existingFile ).when( repositoryMock ).getFile( path.toString() );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "error" ) ).when( repositoryMock )
+      .updateFile( any(), any(), anyString() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( path.toString() ), any() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+
+    assertThrows( ResourceAccessDeniedException.class,
+      () -> repositoryProvider.setFileContent( path, mock( InputStream.class ) ) );
+  }
+
+  @Test
+  void testSetFileContentCoreThrowsNotFoundWhenParentMissingAfterUpdateFailure() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/existingFile.txt" );
+    GenericFilePath parentPath = path.getParent();
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+
+    RepositoryFile existingFile = createNativeFile( "fileId", path, false );
+    doReturn( existingFile ).when( repositoryMock ).getFile( path.toString() );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "error" ) ).when( repositoryMock )
+      .updateFile( any(), any(), anyString() );
+    doReturn( false ).when( fileServiceMock ).doesExist( path.toString() );
+    doReturn( false ).when( fileServiceMock ).doesExist( parentPath.toString() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+
+    assertThrows( NotFoundException.class,
+      () -> repositoryProvider.setFileContent( path, mock( InputStream.class ) ) );
+  }
+
+  @Test
+  void testSetFileContentCoreThrowsResourceAccessDeniedWhenParentNotWritableAfterUpdateFailure() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/existingFile.txt" );
+    GenericFilePath parentPath = path.getParent();
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+
+    RepositoryFile existingFile = createNativeFile( "fileId", path, false );
+    doReturn( existingFile ).when( repositoryMock ).getFile( path.toString() );
+    doThrow( new UnifiedRepositoryAccessDeniedException( "error" ) ).when( repositoryMock )
+      .updateFile( any(), any(), anyString() );
+    doReturn( false ).when( fileServiceMock ).doesExist( encodeRepositoryPath( path.toString() ) );
+    doReturn( createNativeFile( "parentId", parentPath, true ) ).when( repositoryMock )
+      .getFile( parentPath.toString() );
+    doReturn( true ).when( fileServiceMock ).doesExist( encodeRepositoryPath( parentPath.toString() ) );
+    doReturn( false ).when( repositoryMock ).hasAccess( eq( parentPath.toString() ), any() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+
+    assertThrows( ResourceAccessDeniedException.class,
+      () -> repositoryProvider.setFileContent( path, mock( InputStream.class ) ) );
+  }
+
+  @Test
+  void testSetFileContentCoreThrowsOperationFailedWhenParentWritableAfterUpdateFailure() throws Exception {
+    GenericFilePath path = GenericFilePath.parse( "/public/existingFile.txt" );
+    GenericFilePath parentPath = path.getParent();
+    IUnifiedRepository repositoryMock = mock( IUnifiedRepository.class );
+    FileService fileServiceMock = mock( FileService.class );
+    doReturn( true ).when( fileServiceMock ).isPathValid( anyString() );
+
+    RepositoryFile existingFile = createNativeFile( "fileId", path, false );
+    doReturn( existingFile ).when( repositoryMock ).getFile( path.toString() );
+    doThrow( new UnifiedRepositoryException( "error" ) ).when( repositoryMock ).updateFile( any(), any(), anyString() );
+    doReturn( false ).when( fileServiceMock ).doesExist( path.toString() );
+    doReturn( true ).when( fileServiceMock ).doesExist( parentPath.toString() );
+    doReturn( true ).when( repositoryMock ).hasAccess( eq( parentPath.toString() ), any() );
+
+    RepositoryFileProvider repositoryProvider = spy( new RepositoryFileProvider( repositoryMock, fileServiceMock ) );
+    doReturn( null ).when( repositoryProvider ).getContentConverterHandler();
+
+    OperationFailedException exception = assertThrows( OperationFailedException.class,
+      () -> repositoryProvider.setFileContent( path, mock( InputStream.class ) ) );
+    assertEquals( OperationFailedException.class, exception.getClass() );
   }
   // endregion
 

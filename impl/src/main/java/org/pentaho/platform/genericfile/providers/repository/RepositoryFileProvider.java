@@ -207,6 +207,15 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
       throw new AccessControlException( e );
     } catch ( FileService.InvalidNameException e ) {
       throw new InvalidPathException();
+    } catch ( UnifiedRepositoryException e ) {
+      GenericFilePath deniedPath = findFirstNonWritablePath( path );
+
+      if ( deniedPath != null ) {
+        throw new ResourceAccessDeniedException(
+          String.format( "User is not authorized to create folder at '%s'.", deniedPath ), path, e );
+      }
+
+      throw new OperationFailedException( e );
     }
   }
 
@@ -220,7 +229,9 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
       throw new AccessControlException();
     }
 
-    if ( !fileService.isPathValid( path.toString() ) ) {
+    String pathString = pathToString( path );
+
+    if ( !fileService.isPathValid( pathString ) ) {
       throw new InvalidPathException( String.format( "Invalid path: '%s'.", path ) );
     }
 
@@ -261,6 +272,22 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
         file = unifiedRepository.createFile( parentFile.getId(), newFile, fileData, FILE_CREATE_MSG );
       }
     } catch ( UnifiedRepositoryAccessDeniedException e ) {
+      if ( fileService.doesExist( pathString ) && !canWrite( path ) ) {
+        throw new ResourceAccessDeniedException( String.format( "User is not authorized to write to '%s'.", path ),
+          path, e );
+      }
+
+      GenericFilePath parentPath = path.getParent();
+
+      if ( parentPath != null ) {
+        checkFileExists( parentPath );
+
+        if ( !canWrite( parentPath ) ) {
+          throw new ResourceAccessDeniedException(
+            String.format( "User is not authorized to write to '%s'.", parentPath ), parentPath, e );
+        }
+      }
+
       throw new AccessControlException( e );
     } catch ( UnifiedRepositoryException | IOException e ) {
       throw new OperationFailedException( e );
@@ -275,7 +302,9 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
   @Override
   protected void setFileContentCore( @NonNull GenericFilePath path, @NonNull InputStream content )
     throws OperationFailedException {
-    if ( !fileService.isPathValid( path.toString() ) ) {
+    String pathString = pathToString( path );
+
+    if ( !fileService.isPathValid( pathString ) ) {
       throw new InvalidPathException( String.format( "Invalid path: '%s'.", path ) );
     }
 
@@ -295,6 +324,22 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
         throw new NotFoundException( "Unable to update content of " + path + " in the repository." );
       }
     } catch ( UnifiedRepositoryAccessDeniedException e ) {
+      if ( fileService.doesExist( pathString ) && !canWrite( path ) ) {
+        throw new ResourceAccessDeniedException( String.format( "User is not authorized to write to '%s'.", path ),
+          path, e );
+      }
+
+      GenericFilePath parentPath = path.getParent();
+
+      if ( parentPath != null ) {
+        checkFileExists( parentPath );
+
+        if ( !canWrite( parentPath ) ) {
+          throw new ResourceAccessDeniedException(
+            String.format( "User is not authorized to write to '%s'.", parentPath ), parentPath, e );
+        }
+      }
+
       throw new AccessControlException( e );
     } catch ( UnifiedRepositoryException | IOException e ) {
       throw new OperationFailedException( e );
@@ -400,8 +445,10 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
       maxDepth = 1;
     }
 
+    String basePathString = pathToString( basePath );
+
     RepositoryFileTreeDto nativeTree = fileService.doGetTree(
-      pathToString( basePath ),
+      basePathString,
       maxDepth,
       repositoryFilterString,
       options.isIncludeHidden(),
@@ -409,7 +456,15 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
       false );
 
     if ( nativeTree == null ) {
-      throw new NotFoundException( String.format( "Base path not found '%s'.", basePath ), basePath );
+      try {
+        if ( fileService.doesExist( basePathString ) ) {
+          throw new OperationFailedException( String.format( "Unable to get the tree for base path '%s'.", basePath ) );
+        }
+
+        throw new NotFoundException( String.format( "Base path not found '%s'.", basePath ), basePath );
+      } catch ( UnifiedRepositoryAccessDeniedException e ) {
+        throw new AccessControlException( e );
+      }
     }
 
     if ( isZeroDepth ) {
@@ -526,6 +581,10 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
     }
 
     return repositoryFile;
+  }
+
+  protected void checkFileExists( @NonNull GenericFilePath path ) throws OperationFailedException {
+    getNativeFile( path );
   }
 
   /**
@@ -749,6 +808,52 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
     return unifiedRepository.hasAccess( path.toString(), getRepositoryPermissions( permissions ) );
   }
 
+  @SuppressWarnings( "BooleanMethodIsAlwaysInverted" )
+  private boolean canWrite( @NonNull GenericFilePath path ) {
+    return hasAccess( path, EnumSet.of( GenericFilePermission.WRITE ) );
+  }
+
+  @SuppressWarnings( "BooleanMethodIsAlwaysInverted" )
+  private boolean canDelete( @NonNull GenericFilePath path ) {
+    return hasAccess( path, EnumSet.of( GenericFilePermission.DELETE ) );
+  }
+
+  @SuppressWarnings( "BooleanMethodIsAlwaysInverted" )
+  private boolean canManageAcl( @NonNull GenericFilePath path ) {
+    return hasAccess( path, EnumSet.of( GenericFilePermission.ACL_MANAGEMENT ) );
+  }
+
+  @SuppressWarnings( "BooleanMethodIsAlwaysInverted" )
+  private boolean canWrite( @NonNull String path ) throws InvalidPathException {
+    return canWrite( GenericFilePath.parseRequired( path ) );
+  }
+
+  @SuppressWarnings( "BooleanMethodIsAlwaysInverted" )
+  private boolean canDelete( @NonNull String path ) throws InvalidPathException {
+    return canDelete( GenericFilePath.parseRequired( path ) );
+  }
+
+  @SuppressWarnings( "BooleanMethodIsAlwaysInverted" )
+  private boolean canManageAcl( @NonNull String path ) throws InvalidPathException {
+    return canManageAcl( GenericFilePath.parseRequired( path ) );
+  }
+
+  @Nullable
+  private GenericFilePath findFirstNonWritablePath( @NonNull GenericFilePath path ) throws InvalidPathException {
+    GenericFilePath current = path;
+
+    // Walk upward from the target path until we find the closest existing ancestor.
+    while ( current != null ) {
+      if ( fileService.doesExist( pathToString( current ) ) ) {
+        return canWrite( current ) ? null : current;
+      }
+
+      current = current.getParent();
+    }
+
+    return null;
+  }
+
   private EnumSet<RepositoryFilePermission> getRepositoryPermissions( EnumSet<GenericFilePermission> permissions ) {
     EnumSet<RepositoryFilePermission> repositoryFilePermissions = EnumSet.noneOf( RepositoryFilePermission.class );
 
@@ -796,7 +901,16 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
 
     try {
       fileService.doDeleteFilesPermanent( fileId );
+    } catch ( UnifiedRepositoryAccessDeniedException e ) {
+      throw new AccessControlException( e );
     } catch ( Exception e ) {
+      org.pentaho.platform.api.repository2.unified.RepositoryFile file = getNativeFileById( fileId );
+
+      if ( !canDelete( file.getPath() ) ) {
+        throw new ResourceAccessDeniedException( String.format( "User is not authorized to delete '%s'.", path ), path,
+          e );
+      }
+
       throw new OperationFailedException( e );
     }
   }
@@ -814,6 +928,13 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
     } catch ( UnifiedRepositoryAccessDeniedException e ) {
       throw new AccessControlException( e );
     } catch ( Exception e ) {
+      org.pentaho.platform.api.repository2.unified.RepositoryFile file = getNativeFileById( fileId );
+
+      if ( !canDelete( file.getPath() ) ) {
+        throw new ResourceAccessDeniedException( String.format( "User is not authorized to delete '%s'.", path ), path,
+          e );
+      }
+
       throw new OperationFailedException( e );
     }
   }
@@ -827,22 +948,24 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
     } catch ( UnifiedRepositoryAccessDeniedException e ) {
       throw new AccessControlException( e );
     } catch ( InternalError e ) {
+      org.pentaho.platform.api.repository2.unified.RepositoryFile file = getNativeFileById( fileId );
+
+      if ( !canWrite( file.getPath() ) ) {
+        throw new ResourceAccessDeniedException( String.format( "User is not authorized to restore '%s'.", path ), path,
+          e );
+      }
+
       throw new OperationFailedException( e );
     }
   }
 
   @Override
-  public boolean renameFile( @NonNull GenericFilePath path, @NonNull String newName )
-    throws OperationFailedException {
+  public boolean renameFile( @NonNull GenericFilePath path, @NonNull String newName ) throws OperationFailedException {
     if ( !Boolean.parseBoolean( fileService.doGetCanCreate() ) ) {
       throw new AccessControlException();
     }
 
-    String pathString = pathToString( path );
-
-    if ( !fileService.doesExist( pathString ) ) {
-      throw new NotFoundException( String.format( "Path not found '%s'.", path ), path );
-    }
+    checkFileExists( path );
 
     if ( !fileService.isValidFileName( newName, true ) ) {
       throw new InvalidOperationException( String.format( "The new name '%s' is not valid.", newName ) );
@@ -860,8 +983,13 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
     }
 
     try {
-      return fileService.doRename( pathString, newName );
+      return fileService.doRename( pathToString( path ), newName );
     } catch ( UnifiedRepositoryAccessDeniedException e ) {
+      if ( !canWrite( path ) ) {
+        throw new ResourceAccessDeniedException( String.format( "User is not authorized to rename '%s'.", path ), path,
+          e );
+      }
+
       throw new AccessControlException( e );
     } catch ( Exception e ) {
       throw new OperationFailedException( e );
@@ -875,27 +1003,31 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
       throw new AccessControlException();
     }
 
-    String destinationFolderString = pathToString( destinationFolder );
-
-    if ( !fileService.doesExist( destinationFolderString ) ) {
-      throw new NotFoundException( String.format( "Destination folder not found '%s'.", destinationFolder ),
-        destinationFolder );
+    if ( !getNativeFile( destinationFolder ).isFolder() ) {
+      throw new InvalidOperationException( "The destination path is not a folder." );
     }
 
     GenericFilePath newPath = getNewPath( destinationFolder, path.getLastSegment() );
 
     if ( fileService.doesExist( pathToString( newPath ) ) ) {
       throw new ConflictException(
-        String.format( "File to be copied already exists on the destination folder: '%s'.", path ) );
+        String.format( "File to be copied already exists on the destination folder: '%s'.", newPath ) );
     }
 
     String fileId = getFileId( path );
 
     try {
-      fileService.doCopyFiles( destinationFolderString, FileService.MODE_RENAME, fileId );
+      fileService.doCopyFiles( pathToString( destinationFolder ), FileService.MODE_RENAME, fileId );
     } catch ( UnifiedRepositoryAccessDeniedException e ) {
+      checkFileExists( path );
+
+      if ( !canWrite( destinationFolder ) ) {
+        throw new ResourceAccessDeniedException(
+          String.format( "User is not authorized to write to '%s'.", destinationFolder ), destinationFolder, e );
+      }
+
       throw new AccessControlException( e );
-    } catch ( IllegalArgumentException e ) {
+    } catch ( UnifiedRepositoryException | IllegalArgumentException e ) {
       throw new OperationFailedException( e );
     }
   }
@@ -905,6 +1037,10 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
     throws OperationFailedException {
     if ( !Boolean.parseBoolean( fileService.doGetCanCreate() ) ) {
       throw new AccessControlException();
+    }
+
+    if ( !getNativeFile( destinationFolder ).isFolder() ) {
+      throw new InvalidOperationException( "The destination path is not a folder." );
     }
 
     GenericFilePath newPath = getNewPath( destinationFolder, path.getLastSegment() );
@@ -922,8 +1058,20 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
       throw new NotFoundException( String.format( "Destination folder not found '%s'.", destinationFolder ),
         destinationFolder, e );
     } catch ( UnifiedRepositoryAccessDeniedException e ) {
+      checkFileExists( path );
+
+      if ( !canWrite( path ) ) {
+        throw new ResourceAccessDeniedException( String.format( "User is not authorized to move '%s'.", path ), path,
+          e );
+      }
+
+      if ( !canWrite( destinationFolder ) ) {
+        throw new ResourceAccessDeniedException(
+          String.format( "User is not authorized to write to '%s'.", destinationFolder ), destinationFolder, e );
+      }
+
       throw new AccessControlException( e );
-    } catch ( InternalError e ) {
+    } catch ( InternalError | IllegalArgumentException e ) {
       throw new OperationFailedException( e );
     }
   }
@@ -945,8 +1093,17 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
   @Override
   public void setFileMetadata( @NonNull GenericFilePath path, @NonNull IGenericFileMetadata metadata )
     throws OperationFailedException {
+    checkFileExists( path );
+
     try {
       fileService.doSetMetadata( pathToString( path ), convertToNativeFileMetadata( metadata ) );
+    } catch ( UnifiedRepositoryAccessDeniedException e ) {
+      if ( !canWrite( path ) ) {
+        throw new ResourceAccessDeniedException( String.format( "User is not authorized to write to '%s'.", path ),
+          path, e );
+      }
+
+      throw new AccessControlException( e );
     } catch ( GeneralSecurityException e ) {
       throw new AccessControlException( "User is not authorized to perform this operation." );
     }
@@ -956,15 +1113,11 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
   @Override
   public IGenericFileAcl getFileAcl( @NonNull GenericFilePath path, boolean forceInheriting )
     throws OperationFailedException {
-    String pathString = pathToString( path );
-
     // Check existence before trying to get ACL to ensure correct exception is thrown.
-    if ( !fileService.doesExist( pathString ) ) {
-      throw new NotFoundException( String.format( "Path not found '%s'.", path ), path );
-    }
+    checkFileExists( path );
 
     try {
-      return convertFromNativeFileAcl( fileService.doGetFileAcl( pathString, forceInheriting ) );
+      return convertFromNativeFileAcl( fileService.doGetFileAcl( pathToString( path ), forceInheriting ) );
     } catch ( UnifiedRepositoryAccessDeniedException e ) {
       throw new AccessControlException( e );
     } catch ( InvalidOperationException e ) {
@@ -984,12 +1137,21 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
           + "permissions." );
     }
 
+    String pathString = pathToString( path );
+
     try {
-      fileService.setFileAcls( pathToString( path ), convertToNativeFileAcl( acl ) );
+      fileService.setFileAcls( pathString, convertToNativeFileAcl( acl ) );
     } catch ( FileNotFoundException e ) {
       throw new NotFoundException( String.format( "Path not found '%s'.", path ), path, e );
     } catch ( UnifiedRepositoryAccessDeniedException e ) {
       throw new AccessControlException( e );
+    } catch ( UnifiedRepositoryException e ) {
+      if ( fileService.doesExist( pathString ) && !canManageAcl( path ) ) {
+        throw new ResourceAccessDeniedException(
+          String.format( "User is not authorized to manage the ACL of '%s'.", path ), path, e );
+      }
+
+      throw new OperationFailedException( e );
     } catch ( Exception e ) {
       throw new OperationFailedException( e );
     }
@@ -1027,6 +1189,17 @@ public class RepositoryFileProvider extends BaseGenericFileProvider<RepositoryFi
 
   protected String getFileId( @NonNull GenericFilePath path ) throws OperationFailedException {
     return getNativeFile( path ).getId().toString();
+  }
+
+  protected org.pentaho.platform.api.repository2.unified.RepositoryFile getNativeFileById( @NonNull String fileId )
+    throws NotFoundException {
+    final var file = unifiedRepository.getFileById( fileId );
+
+    if ( file == null ) {
+      throw new NotFoundException( String.format( "Path not found '%s'.", fileId ) );
+    }
+
+    return file;
   }
 
   protected org.pentaho.platform.api.repository2.unified.RepositoryFile getOrCreateNativeFolder(
