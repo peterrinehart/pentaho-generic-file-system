@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -321,6 +322,27 @@ class IGenericFileServiceTest {
       CreateFileOptions options = new CreateFileOptions();
 
       assertThrows( InvalidPathException.class, () -> service.createFile( "foo", mockContent, options ) );
+    }
+  }
+
+  /**
+   * Tests for the {@link IGenericFileService#moveFile(String, String)} method.
+   */
+  @Nested
+  class MoveFileTests {
+    @Test
+    void testValidStringPathsDelegateToMove() throws OperationFailedException {
+      GenericFileServiceForTesting service = spy( new GenericFileServiceForTesting() );
+      ArgumentCaptor<GenericFilePath> pathCaptor = ArgumentCaptor.forClass( GenericFilePath.class );
+      ArgumentCaptor<GenericFilePath> destinationCaptor = ArgumentCaptor.forClass( GenericFilePath.class );
+
+      doNothing().when( service ).moveFile( any( GenericFilePath.class ), any( GenericFilePath.class ) );
+
+      service.moveFile( "/source/file.txt", "/destination" );
+
+      verify( service ).moveFile( pathCaptor.capture(), destinationCaptor.capture() );
+      assertEquals( "/source/file.txt", pathCaptor.getValue().toString() );
+      assertEquals( "/destination", destinationCaptor.getValue().toString() );
     }
   }
 }
