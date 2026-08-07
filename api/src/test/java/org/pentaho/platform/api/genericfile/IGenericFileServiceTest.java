@@ -330,4 +330,25 @@ class IGenericFileServiceTest {
       assertThrows( InvalidPathException.class, () -> service.createFile( "foo", mockContent, options ) );
     }
   }
+
+  /**
+   * Tests for the {@link IGenericFileService#moveFile(String, String)} method.
+   */
+  @Nested
+  class MoveFileTests {
+    @Test
+    void testValidStringPathsDelegateToMove() throws OperationFailedException {
+      GenericFileServiceForTesting service = spy( new GenericFileServiceForTesting() );
+      ArgumentCaptor<GenericFilePath> pathCaptor = ArgumentCaptor.forClass( GenericFilePath.class );
+      ArgumentCaptor<GenericFilePath> destinationCaptor = ArgumentCaptor.forClass( GenericFilePath.class );
+
+      doNothing().when( service ).moveFile( any( GenericFilePath.class ), any( GenericFilePath.class ) );
+
+      service.moveFile( "/source/file.txt", "/destination" );
+
+      verify( service ).moveFile( pathCaptor.capture(), destinationCaptor.capture() );
+      assertEquals( "/source/file.txt", pathCaptor.getValue().toString() );
+      assertEquals( "/destination", destinationCaptor.getValue().toString() );
+    }
+  }
 }

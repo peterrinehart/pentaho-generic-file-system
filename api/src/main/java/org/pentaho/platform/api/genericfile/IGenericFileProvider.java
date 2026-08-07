@@ -211,12 +211,16 @@ public interface IGenericFileProvider<T extends IGenericFile> {
 
   /**
    * Checks whether a generic file exists and the current user has the specified permissions on it.
+   * <p>
+   * A missing or unreadable file, or a file for which the requested permissions are not granted, produces
+   * {@code false}. Access-control exceptions represent operation-wide authorization failure before the resource check,
+   * not a negative result for the requested file permissions.
    *
    * @param path        The path of the generic file.
    * @param permissions Set of permissions needed for any operation like READ/WRITE/DELETE
    * @return {@code true}, if the conditions are; {@code false}, otherwise.
-   * @throws AccessControlException   If the current user cannot perform this operation.
-   * @throws OperationFailedException If the operation fails for some other (checked) reason.
+   * @throws AccessControlException   If the current user cannot perform this operation in general.
+   * @throws OperationFailedException If the provider fails before producing a boolean result.
    * @see IGenericFileService#hasAccess(String, EnumSet)
    */
   boolean hasAccess( @NonNull GenericFilePath path, @NonNull EnumSet<GenericFilePermission> permissions )
@@ -433,7 +437,7 @@ public interface IGenericFileProvider<T extends IGenericFile> {
    *             {@link IGenericFileAcl}, the acl must contain at least one entry; when{@code entriesInheriting} is
    *             {@code true}, the acl entries may be {@code null} or empty and will be interpreted according to the
    *             inheritance semantics.
-   * @throws ResourceAccessDeniedException If the current user cannot write to the given path.
+   * @throws ResourceAccessDeniedException If the current user cannot manage the ACL of the given path.
    * @throws InvalidOperationException     If the Access Control List (ACL) is not valid, for the target file (for
    *                                       example, if inheritance is disabled but no entries are provided).
    * @throws AccessControlException        If the current user cannot perform this operation.
