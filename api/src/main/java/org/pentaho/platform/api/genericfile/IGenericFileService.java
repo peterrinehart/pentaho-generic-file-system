@@ -374,6 +374,10 @@ public interface IGenericFileService {
    * Checks whether a generic file exists and the current user has the specified permissions on it, given its path's
    * string representation.
    * <p>
+   * A missing or unreadable file, or a file for which the requested permissions are not granted, produces
+   * {@code false}. Access-control exceptions represent operation-wide authorization failure before the resource check,
+   * not a negative result for the requested file permissions.
+   * <p>
    * The default implementation of this method parses the given path's string representation using
    * {@link GenericFilePath#parseRequired(String)} and then calls {@link #hasAccess(GenericFilePath, EnumSet)} with the
    * result.
@@ -383,8 +387,8 @@ public interface IGenericFileService {
    * @return {@code true}, if the conditions are; {@code false}, otherwise.
    * @throws InvalidPathException     If the specified path's string representation is not valid, according to
    *                                  {@link GenericFilePath#parseRequired(String)}.
-   * @throws AccessControlException   If the current user cannot perform this operation.
-   * @throws OperationFailedException If the operation fails for some other (checked) reason.
+   * @throws AccessControlException   If the current user cannot perform this operation in general.
+   * @throws OperationFailedException If the provider fails before producing a boolean result.
    * @see IGenericFileService#hasAccess(GenericFilePath, EnumSet)
    */
   default boolean hasAccess( @NonNull String path, @NonNull EnumSet<GenericFilePermission> permissions )
@@ -394,12 +398,16 @@ public interface IGenericFileService {
 
   /**
    * Checks whether a generic file exists and the current user has the specified permissions on it.
+   * <p>
+   * A missing or unreadable file, or a file for which the requested permissions are not granted, produces
+   * {@code false}. Access-control exceptions represent operation-wide authorization failure before the resource check,
+   * not a negative result for the requested file permissions.
    *
    * @param path        The path of the generic file.
    * @param permissions Set of permissions needed for any operation like READ/WRITE/DELETE
    * @return {@code true}, if the conditions are; {@code false}, otherwise.
-   * @throws AccessControlException   If the current user cannot perform this operation.
-   * @throws OperationFailedException If the operation fails for some other (checked) reason.
+   * @throws AccessControlException   If the current user cannot perform this operation in general.
+   * @throws OperationFailedException If the provider fails before producing a boolean result.
    */
   boolean hasAccess( @NonNull GenericFilePath path, @NonNull EnumSet<GenericFilePermission> permissions )
     throws OperationFailedException;
@@ -936,7 +944,7 @@ public interface IGenericFileService {
    * @see IGenericFileService#moveFile(GenericFilePath, GenericFilePath)
    */
   default void moveFile( @NonNull String path, @NonNull String destinationFolder ) throws OperationFailedException {
-    copyFile( GenericFilePath.parseRequired( path ), GenericFilePath.parseRequired( destinationFolder ) );
+    moveFile( GenericFilePath.parseRequired( path ), GenericFilePath.parseRequired( destinationFolder ) );
   }
 
   /**
@@ -1112,7 +1120,7 @@ public interface IGenericFileService {
    *             {@link IGenericFileAcl}, the acl must contain at least one entry; when{@code entriesInheriting} is
    *             {@code true}, the acl entries may be {@code null} or empty and will be interpreted according to the
    *             inheritance semantics.
-   * @throws ResourceAccessDeniedException If the current user cannot write to the given path.
+   * @throws ResourceAccessDeniedException If the current user cannot manage the ACL of the given path.
    * @throws InvalidOperationException     If the Access Control List (ACL) is not valid, for the target file (for
    *                                       example, if inheritance is disabled but no entries are provided).
    * @throws AccessControlException        If the current user cannot perform this operation.
@@ -1136,7 +1144,7 @@ public interface IGenericFileService {
    *             {@link IGenericFileAcl}, the acl must contain at least one entry; when{@code entriesInheriting} is
    *             {@code true}, the acl entries may be {@code null} or empty and will be interpreted according to the
    *             inheritance semantics.
-   * @throws ResourceAccessDeniedException If the current user cannot write to the given path.
+   * @throws ResourceAccessDeniedException If the current user cannot manage the ACL of the given path.
    * @throws InvalidOperationException     If the Access Control List (ACL) is not valid, for the target file (for
    *                                       example, if inheritance is disabled but no entries are provided).
    * @throws InvalidPathException          If the specified path's string representation is not valid, according to
