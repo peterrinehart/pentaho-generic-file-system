@@ -12,6 +12,8 @@
 
 package org.pentaho.platform.api.genericfile.model;
 
+import edu.umd.cs.findbugs.annotations.NonNull;
+
 import java.io.InputStream;
 
 // NOTE: Designed after the class
@@ -26,11 +28,13 @@ public interface IGenericFileContent {
   /**
    * Gets the file's content InputStream.
    */
+  @NonNull
   InputStream getInputStream();
 
   /**
    * Gets the name of the file associated with the content InputStream.
    */
+  @NonNull
   String getFileName();
 
   /**
@@ -38,5 +42,6 @@ public interface IGenericFileContent {
    * <p>
    * For more information on MIME types, @see <a href="https://www.w3.org/wiki/WebIntents/MIME_Types">MIME Types</a>
    */
+  @NonNull
   String getMimeType();
 }

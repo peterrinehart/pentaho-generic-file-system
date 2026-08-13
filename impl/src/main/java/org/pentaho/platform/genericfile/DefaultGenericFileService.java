@@ -201,11 +201,17 @@ public class DefaultGenericFileService implements IGenericFileService {
   }
 
   @Override
-  public boolean createFile( @NonNull GenericFilePath path,
-                             @NonNull InputStream content,
-                             @NonNull CreateFileOptions createFileOptions )
+  public void createFile( @NonNull GenericFilePath path,
+                          @NonNull InputStream content,
+                          @NonNull CreateFileOptions createFileOptions )
     throws OperationFailedException {
-    return getOwnerFileProvider( path ).createFile( path, content, createFileOptions );
+    getOwnerFileProvider( path ).createFile( path, content, createFileOptions );
+  }
+
+  @Override
+  public void setFileContent( @NonNull GenericFilePath path, @NonNull InputStream content )
+    throws OperationFailedException {
+    getOwnerFileProvider( path ).setFileContent( path, content );
   }
 
   @NonNull

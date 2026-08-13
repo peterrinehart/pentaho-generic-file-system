@@ -13,6 +13,7 @@
 
 package org.pentaho.platform.genericfile.model;
 
+import edu.umd.cs.findbugs.annotations.NonNull;
 import org.pentaho.platform.api.genericfile.model.IGenericFileContent;
 
 import java.io.InputStream;
@@ -29,16 +30,19 @@ public class DefaultGenericFileContent implements IGenericFileContent {
   }
 
   @Override
+  @NonNull
   public InputStream getInputStream() {
     return inputStream;
   }
 
   @Override
+  @NonNull
   public String getFileName() {
     return fileName;
   }
 
   @Override
+  @NonNull
   public String getMimeType() {
     return mimeType;
   }
